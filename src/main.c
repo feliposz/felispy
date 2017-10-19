@@ -3,6 +3,20 @@
 #include <string.h>
 #include "mpc.h"
 
+typedef enum { LVAL_INTEGER, LVAL_DECIMAL, LVAL_ERR } lval_type_t;
+typedef enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM } lval_err_t;
+
+typedef struct
+{
+    lval_type_t type;
+    union
+    {
+        long integer;
+        double decimal;
+        lval_err_t err;
+    };
+} lval;
+
 #ifdef _WIN32
 #include <windows.h>
 
@@ -99,61 +113,178 @@ int count_nodes(mpc_ast_t *t)
     return count;
 }
 
-long eval_op(long x, char* op, long y)
+lval lval_integer(long integer)
 {
-    if (strcmp(op, "+") == 0)
-    {
-        return x + y;
-    }
-    else if (strcmp(op, "-") == 0)
-    {
-        return x - y;
-    }
-    else if (strcmp(op, "*") == 0)
-    {
-        return x * y;
-    }
-    else if (strcmp(op, "/") == 0)
-    {
-        return x / y;
-    }
-    else if (strcmp(op, "%") == 0)
-    {
-        return x % y;
-    }
-    else if (strcmp(op, "^") == 0)
-    {
-        long result = 1;
-        while (y-- > 0)
-        {
-            result *= x;
-        }
-        return result;
-    }
-    else if (strcmp(op, "min") == 0)
-    {
-        return x < y ? x : y;
-    }
-    else if (strcmp(op, "max") == 0)
-    {
-        return x > y ? x : y;
-    }
-    return 0;
+    lval l;
+    l.type = LVAL_INTEGER;
+    l.integer = integer;
+    return l;
 }
 
-long eval(mpc_ast_t* t)
+lval lval_decimal(double decimal)
 {
-    if (strstr(t->tag, "number"))
+    lval l;
+    l.type = LVAL_DECIMAL;
+    l.decimal = decimal;
+    return l;
+}
+
+lval lval_err(int err)
+{
+    lval l;
+    l.type = LVAL_ERR;
+    l.err = err;
+    return l;
+}
+
+lval eval_op(lval x, char* op, lval y)
+{
+    if (x.type == LVAL_ERR)
     {
-        return atoi(t->contents);
+        return x;
+    }
+    if (y.type == LVAL_ERR)
+    {
+        return y;
+    }
+
+    if (x.type == LVAL_INTEGER && y.type == LVAL_INTEGER)
+    {
+        if (strcmp(op, "+") == 0)
+        {
+            return lval_integer(x.integer + y.integer);
+        }
+        else if (strcmp(op, "-") == 0)
+        {
+            return lval_integer(x.integer - y.integer);
+        }
+        else if (strcmp(op, "*") == 0)
+        {
+            return lval_integer(x.integer * y.integer);
+        }
+        else if (strcmp(op, "/") == 0)
+        {
+            if (y.integer == 0)
+            {
+                return lval_err(LERR_DIV_ZERO);
+            }
+            else
+            {
+                return lval_integer(x.integer / y.integer);
+            }
+        }
+        else if (strcmp(op, "%") == 0)
+        {
+            if (y.integer == 0)
+            {
+                return lval_err(LERR_DIV_ZERO);
+            }
+            else
+            {
+                return lval_integer(x.integer % y.integer);
+            }
+        }
+        else if (strcmp(op, "^") == 0)
+        {
+            long result = 1;
+            for (long l = 0; l < y.integer; l++)
+            {
+                result *= x.integer;
+            }
+            return lval_integer(result);
+        }
+        else if (strcmp(op, "min") == 0)
+        {
+            return lval_integer(x.integer < y.integer ? x.integer : y.integer);
+        }
+        else if (strcmp(op, "max") == 0)
+        {
+            return lval_integer(x.integer > y.integer ? x.integer : y.integer);
+        }
+    }
+    else if (x.type == LVAL_DECIMAL && y.type == LVAL_DECIMAL)
+    {
+        if (strcmp(op, "+") == 0)
+        {
+            return lval_decimal(x.decimal + y.decimal);
+        }
+        else if (strcmp(op, "-") == 0)
+        {
+            return lval_decimal(x.decimal - y.decimal);
+        }
+        else if (strcmp(op, "*") == 0)
+        {
+            return lval_decimal(x.decimal * y.decimal);
+        }
+        else if (strcmp(op, "/") == 0)
+        {
+            if (y.decimal == 0)
+            {
+                return lval_err(LERR_DIV_ZERO);
+            }
+            else
+            {
+                return lval_decimal(x.decimal / y.decimal);
+            }
+        }
+        else if (strcmp(op, "%") == 0)
+        {
+            if (y.decimal == 0)
+            {
+                return lval_err(LERR_DIV_ZERO);
+            }
+            else
+            {
+                return lval_err(LERR_BAD_OP); // TODO: Is there a proper implementation for this?
+            }
+        }
+        else if (strcmp(op, "^") == 0)
+        {
+            return lval_decimal(pow(x.decimal, y.decimal));
+        }
+        else if (strcmp(op, "min") == 0)
+        {
+            return lval_decimal(x.decimal < y.decimal ? x.decimal : y.decimal);
+        }
+        else if (strcmp(op, "max") == 0)
+        {
+            return lval_decimal(x.decimal > y.decimal ? x.decimal : y.decimal);
+        }
+    }
+    else if (x.type == LVAL_DECIMAL && y.type == LVAL_INTEGER)
+    {
+        return eval_op(x, op, lval_decimal((double) y.integer));
+    }
+    else if (x.type == LVAL_INTEGER && y.type == LVAL_DECIMAL)
+    {
+        return eval_op(lval_decimal((double)x.integer), op, y);
+    }
+
+    return lval_err(LERR_BAD_OP);
+}
+
+lval eval(mpc_ast_t* t)
+{
+    if (strstr(t->tag, "integer"))
+    {
+        errno = 0;
+        long x = strtol(t->contents, NULL, 10);
+        return errno == ERANGE ? lval_err(LERR_BAD_NUM) : lval_integer(x);
+    }
+    else if (strstr(t->tag, "decimal"))
+    {
+        errno = 0;
+        double x = strtof(t->contents, NULL);
+        return errno == ERANGE ? lval_err(LERR_BAD_NUM) : lval_decimal(x);
     }
 
     char* op = t->children[1]->contents;
-    long result = eval(t->children[2]);
+    lval result = eval(t->children[2]);
     // unary plus / minus
     if (t->children_num == 4 && strcmp(op, "-") == 0)
     {
-        result = -result;
+        lval zero = lval_integer(0);
+        result = eval_op(zero, "-", result);
     }
     else
     {
@@ -166,38 +297,79 @@ long eval(mpc_ast_t* t)
     return result;
 }
 
+void lval_print(lval l)
+{
+    if (l.type == LVAL_INTEGER)
+    {
+#ifdef _WIN32
+        SetConsoleTextAttribute(hOutput, 14);
+#endif
+        printf("%li", l.integer);
+    }
+    else if (l.type == LVAL_DECIMAL)
+    {
+#ifdef _WIN32
+        SetConsoleTextAttribute(hOutput, 14);
+#endif
+        printf("%lf", l.decimal);
+    }
+    else if (l.type == LVAL_ERR)
+    {
+#ifdef _WIN32
+        SetConsoleTextAttribute(hOutput, 12);
+#endif
+        switch (l.err)
+        {
+            case LERR_DIV_ZERO:
+                printf("Error: division by zero");
+                break;
+            case LERR_BAD_OP:
+                printf("Error: bad operator");
+                break;
+            case LERR_BAD_NUM:
+                printf("Error: bad number");
+                break;
+            default:
+                printf("Error: unknown error");
+                exit(1);
+                break;
+        }
+    }
+    else
+    {
+#ifdef _WIN32
+        SetConsoleTextAttribute(hOutput, 12);
+#endif
+        printf("Internal error!!!");
+        exit(2);
+    }
+}
+
+void lval_println(lval l)
+{
+    lval_print(l);
+    putchar('\n');
+}
+
 int main(int argc, char** argv)
 {
+    mpc_parser_t* Integer = mpc_new("integer");
+    mpc_parser_t* Decimal = mpc_new("decimal");
     mpc_parser_t* Number = mpc_new("number");
     mpc_parser_t* Operator = mpc_new("operator");
     mpc_parser_t* Expr = mpc_new("expr");
     mpc_parser_t* Lispy = mpc_new("lispy");
 
-#if 1
     char* Grammar =
-        "number   : /-?[0-9]+/ ; "
+        "integer  : /-?[0-9]+/ ; "
+        "decimal  : /-?[0-9]*\\.[0-9]+/ ; "
+        "number   : <decimal> | <integer> ; "
         "operator : '+' | '-' | '*' | '/' | '%' | '^' | \"min\" | \"max\"; "
         "expr     : <number> | '(' <operator> <expr>+ ')' ; "
         "lispy    : /^/ <operator> <expr>+ /$/ ; ";
-#endif
 
-#if 0
-    char* Grammar =
-        "number   : /-?[0-9]+\\.?[0-9]*/ ; "
-        "operator : '+' | '-' | '*' | '/' | '%' | \"add\" | \"sub\" | \"mul\" | \"div\" | \"mod\" ; "
-        "expr     : <number> | '(' <operator> <expr>+ ')' ; "
-        "lispy    : /^/ <operator> <expr>+ /$/ ;  ";
-#endif
 
-#if 0
-    char* Grammar =
-        "number   : /-?[0-9]+\\.?[0-9]*/ ; "
-        "operator : '+' | '-' | '*' | '/' | '%' | \"add\" | \"sub\" | \"mul\" | \"div\" | \"mod\" ; "
-        "expr     : <number> <operator> <expr> | '(' <expr> ')' <operator> <expr> | '(' <expr> ')' | <number> ; "
-        "lispy    : /^/ <expr> /$/ ;  ";
-#endif
-
-    mpca_lang(MPCA_LANG_DEFAULT, Grammar, Number, Operator, Expr, Lispy);
+    mpca_lang(MPCA_LANG_DEFAULT, Grammar, Integer, Decimal, Number, Operator, Expr, Lispy);
 
 #ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO csbInfo;
@@ -205,7 +377,7 @@ int main(int argc, char** argv)
     GetConsoleScreenBufferInfo(hOutput, &csbInfo);
     SetConsoleTextAttribute(hOutput, 10);
 #endif
-    puts("Felispy 0.0.1 - by Felipo");
+    puts("Felispy 0.0.8 - by Felipo");
     puts("Type ctrl+C to exit.\n");
 
     while (1)
@@ -213,26 +385,24 @@ int main(int argc, char** argv)
         char* input = readline("Felispy> ");
 
 #ifdef _WIN32
-        SetConsoleTextAttribute(hOutput, 12);
+        SetConsoleTextAttribute(hOutput, 3);
 #endif
-        printf("Input: %s\n", input);
+        //printf("Input: %s\n", input);
 
         mpc_result_t result;
         if (mpc_parse("<stdin>", input, Lispy, &result))
         {
+            /*
             printf("Count: %d\n", count_all(result.output));
             printf("Nodes: %d\n", count_nodes(result.output));
             printf("Leaves: %d\n", count_leaves(result.output));
             printf("Max. Leaves: %d\n", max_leaves(result.output));
 #ifdef _WIN32
-            SetConsoleTextAttribute(hOutput, 15);
+            SetConsoleTextAttribute(hOutput, 11);
 #endif
             mpc_ast_print(result.output);
-
-#ifdef _WIN32
-            SetConsoleTextAttribute(hOutput, 14);
-#endif
-            printf("%li\n", eval(result.output));
+            */
+            lval_println(eval(result.output));
 
             mpc_ast_delete(result.output);
         }
@@ -252,6 +422,6 @@ int main(int argc, char** argv)
     SetConsoleTextAttribute(hOutput, csbInfo.wAttributes);
 #endif
 
-    mpc_cleanup(4, Number, Operator, Expr, Lispy);
+    mpc_cleanup(6, Integer, Decimal, Number, Operator, Expr, Lispy);
     return 0;
 }
