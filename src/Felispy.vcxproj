@@ -23,6 +23,7 @@
     <ClCompile Include="mpc.c" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="debug_alloc.h" />
     <ClInclude Include="mpc.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

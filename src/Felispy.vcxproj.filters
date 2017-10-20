@@ -26,5 +26,8 @@
     <ClInclude Include="mpc.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="debug_alloc.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
