@@ -1,10 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "mpc.h"
 #include "debug_alloc.h"
 
-typedef enum { LVAL_ERR, LVAL_INTEGER, LVAL_DECIMAL, LVAL_SYM, LVAL_SEXPR } lval_type_t;
+#include "mpc.h"
+
+typedef enum
+{
+    LVAL_ERR,
+    LVAL_INTEGER,
+    LVAL_DECIMAL,
+    LVAL_SYM,
+    LVAL_SEXPR,
+    LVAL_QEXPR
+} lval_type_t;
 
 typedef struct lval
 {
@@ -168,6 +177,15 @@ lval* lval_sexpr(void)
     return v;
 }
 
+lval* lval_qexpr()
+{
+    lval *v = malloc(sizeof(lval));
+    v->type = LVAL_QEXPR;
+    v->count = 0;
+    v->cell = NULL;
+    return v;
+}
+
 void lval_del(lval *v)
 {
     switch (v->type)
@@ -185,6 +203,7 @@ void lval_del(lval *v)
             break;
 
         case LVAL_SEXPR:
+        case LVAL_QEXPR:
             for (int i = 0; i < v->count; i++)
             {
                 lval_del(v->cell[i]);
@@ -369,6 +388,10 @@ lval* lval_read(mpc_ast_t* t)
     {
         x = lval_sexpr();
     }
+    if (strstr(t->tag, "qexpr"))
+    {
+        x = lval_qexpr();
+    }
 
     for (int i = 0; i < t->children_num - 1; i++)
     {
@@ -434,6 +457,10 @@ void lval_print(lval* v)
     {
         lval_expr_print(v, '(', ')');
     }
+    else if (v->type == LVAL_QEXPR)
+    {
+        lval_expr_print(v, '{', '}');
+    }
     else if (v->type == LVAL_ERR)
     {
         fore_color(12);
@@ -473,6 +500,116 @@ lval* lval_take(lval* v, int i)
     return x;
 }
 
+
+lval *lval_join(lval *x, lval *y)
+{
+    while (y->count > 0)
+    {
+        x = lval_add(x, lval_pop(y, 0));
+    }
+    lval_del(y);
+    return x;
+}
+
+lval* lval_eval(lval* v);
+
+#define LASSERT(args, cond, err) \
+    if (!(cond)) { lval_del(args); return lval_err(err); }
+
+#define LASSERT_COUNT(a, num, err) LASSERT(a, a->count == num, err)
+#define LASSERT_NOT_EMPTY(a, err) LASSERT(a, a->cell[0]->count > 0, err)
+
+lval *builtin_head(lval *a)
+{
+    LASSERT_COUNT(a, 1, "Expected one argument for head.");
+    LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "Argument for head is not a Q-expression.");
+    LASSERT_NOT_EMPTY(a, "Empty Q-expression for head.");
+
+    lval *v = lval_take(a, 0);
+    while (v->count > 1)
+    {
+        lval_del(lval_pop(v, 1));
+    }
+    return v;
+}
+
+lval *builtin_tail(lval *a)
+{
+    LASSERT_COUNT(a, 1, "Expected one argument for tail.");
+    LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "Argument for tail is not a Q-expression.");
+    LASSERT_NOT_EMPTY(a, "Empty Q-expression for tail.");
+
+    lval *v = lval_take(a, 0);
+    lval_del(lval_pop(v, 0));
+    return v;
+}
+
+lval *builtin_list(lval *a)
+{
+    a->type = LVAL_QEXPR;
+    return a;
+}
+
+lval *builtin_eval(lval *a)
+{
+    LASSERT_COUNT(a, 1, "Expected one argument for eval.");
+    LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "Argument for tail is not a Q-expression.");
+    lval *x = lval_take(a, 0);
+    x->type = LVAL_SEXPR;
+    return lval_eval(x);
+}
+
+lval *builtin_join(lval *a)
+{
+    for (int i = 0; i < a->count; i++)
+    {
+        LASSERT(a, a->cell[i]->type == LVAL_QEXPR, "Argument for join is not a Q-expression.");
+    }
+
+    lval* x = lval_pop(a, 0);
+    while (a->count > 0)
+    {
+        x = lval_join(x, lval_pop(a, 0));
+    }
+    lval_del(a);
+    return x;
+}
+
+lval* builtin_cons(lval* a)
+{
+    LASSERT_COUNT(a, 2, "Cons takes two arguments");
+    LASSERT(a, a->cell[1]->type == LVAL_QEXPR, "Second argument for cons should be a Q-expression.");
+
+    lval* x = lval_pop(a, 0);
+    lval* q = lval_qexpr();
+    q = lval_add(q, x);
+    lval* p = lval_take(a, 0);
+    return lval_join(q, p);
+}
+
+lval* builtin_len(lval* a)
+{
+    LASSERT_COUNT(a, 1, "Len takes one argument");
+    LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "Argument for len should be a Q-expression.");
+
+    lval* x = lval_take(a, 0);
+    lval* l = lval_integer(x->count);
+    lval_del(x);
+    return l;
+}
+
+lval* builtin_init(lval* a)
+{
+    LASSERT_COUNT(a, 1, "Init takes one argument");
+    LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "Argument for init should be a Q-expression.");
+    LASSERT_NOT_EMPTY(a, "Q-expression is empty");
+
+    lval* x = lval_take(a, 0);
+    lval* y = lval_pop(x, x->count - 1);
+    lval_del(y);
+    return x;
+}
+
 lval* builtin_op(lval* v, char* sym)
 {
     lval* x = lval_pop(v, 0);
@@ -481,6 +618,7 @@ lval* builtin_op(lval* v, char* sym)
     {
         if (v->cell[i]->type != LVAL_INTEGER && v->cell[i]->type != LVAL_DECIMAL)
         {
+            lval_del(x);
             lval_del(v);
             return lval_err("Invalid operand, expected integer or decimal");
         }
@@ -508,7 +646,52 @@ lval* builtin_op(lval* v, char* sym)
     return x;
 }
 
-lval* lval_eval(lval* v);
+lval *builtin(lval *a, char *func)
+{
+    lval *result = NULL;
+    if (strcmp(func, "list") == 0)
+    {
+        result = builtin_list(a);
+    }
+    else if (strcmp(func, "head") == 0)
+    {
+        result = builtin_head(a);
+    }
+    else if (strcmp(func, "tail") == 0)
+    {
+        result = builtin_tail(a);
+    }
+    else if (strcmp(func, "eval") == 0)
+    {
+        result = builtin_eval(a);
+    }
+    else if (strcmp(func, "join") == 0)
+    {
+        result = builtin_join(a);
+    }
+    else if (strcmp(func, "cons") == 0)
+    {
+        result = builtin_cons(a);
+    }
+    else if (strcmp(func, "len") == 0)
+    {
+        result = builtin_len(a);
+    }
+    else if (strcmp(func, "init") == 0)
+    {
+        result = builtin_init(a);
+    }
+    else if (strstr("+-*/%^ min max", func) >= 0)
+    {
+        result = builtin_op(a, func);
+    }
+    else
+    {
+        lval_del(a);
+        result = lval_err("Unknown function");
+    }
+    return result;
+}
 
 lval* lval_eval_sexpr(lval* v)
 {
@@ -546,7 +729,7 @@ lval* lval_eval_sexpr(lval* v)
         return lval_err("Symbol expected on s-expression");
     }
 
-    lval* result = builtin_op(v, op->sym);
+    lval* result = builtin(v, op->sym);
     lval_del(op);
     return result;
 }
@@ -570,6 +753,7 @@ int main(int argc, char** argv)
     mpc_parser_t* Number = mpc_new("number");
     mpc_parser_t* Symbol = mpc_new("symbol");
     mpc_parser_t* Sexpr = mpc_new("sexpr");
+    mpc_parser_t* Qexpr = mpc_new("qexpr");
     mpc_parser_t* Expr = mpc_new("expr");
     mpc_parser_t* Lispy = mpc_new("lispy");
 
@@ -577,13 +761,16 @@ int main(int argc, char** argv)
         "integer  : /-?[0-9]+/ ; "
         "decimal  : /-?[0-9]*\\.[0-9]+/ ; "
         "number   : <decimal> | <integer> ; "
-        "symbol   : '+' | '-' | '*' | '/' | '%' | '^' | \"min\" | \"max\"; "
+        "symbol   : '+' | '-' | '*' | '/' | '%' | '^' | \"min\" | \"max\" "
+        "         | \"list\" | \"head\" | \"tail\" | \"join\" | \"eval\" "
+        "         | \"cons\" | \"len\" | \"init\" ; "
         "sexpr    : '(' <expr>* ')' ; "
-        "expr     : <number> | <symbol> | <sexpr> ; "
+        "qexpr    : '{' <expr>* '}' ; "
+        "expr     : <number> | <symbol> | <sexpr> | <qexpr> ; "
         "lispy    : /^/ <expr>* /$/ ; ";
 
 
-    mpca_lang(MPCA_LANG_DEFAULT, Grammar, Integer, Decimal, Number, Symbol, Sexpr, Expr, Lispy);
+    mpca_lang(MPCA_LANG_DEFAULT, Grammar, Integer, Decimal, Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
 
 #ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO csbInfo;
@@ -592,7 +779,7 @@ int main(int argc, char** argv)
 #endif
 
     fore_color(10);
-    puts("Felispy 0.0.9 - by Felipo");
+    puts("Felispy 0.1.0 - by Felipo");
     puts("Type ctrl+C to exit.\n");
 
     while (1)
@@ -613,10 +800,11 @@ int main(int argc, char** argv)
             fore_color(11);
             mpc_ast_print(result.output);
             */
+
             //lval* v = eval(result.output);
             lval* v = lval_read(result.output);
-            lval_println(v);
-            v = lval_eval(v); // ???
+            //lval_println(v);
+            v = lval_eval(v);
             lval_println(v);
             lval_del(v);
 
@@ -638,6 +826,6 @@ int main(int argc, char** argv)
     SetConsoleTextAttribute(hOutput, csbInfo.wAttributes);
 #endif
 
-    mpc_cleanup(7, Integer, Decimal, Number, Symbol, Sexpr, Expr, Lispy);
+    mpc_cleanup(7, Integer, Decimal, Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
     return 0;
 }
