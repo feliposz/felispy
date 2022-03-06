@@ -2,19 +2,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include "mpc.h"
+#include "debug_alloc.h"
 
-typedef enum { LVAL_INTEGER, LVAL_DECIMAL, LVAL_ERR } lval_type_t;
-typedef enum { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM } lval_err_t;
+typedef enum { LVAL_ERR, LVAL_INTEGER, LVAL_DECIMAL, LVAL_SYM, LVAL_SEXPR } lval_type_t;
 
-typedef struct
+typedef struct lval
 {
     lval_type_t type;
-    union
-    {
-        long integer;
-        double decimal;
-        lval_err_t err;
-    };
+    long integer;
+    double decimal;
+    char *err;
+    char *sym;
+    int count;
+    struct lval** cell;
 } lval;
 
 #ifdef _WIN32
@@ -22,14 +22,20 @@ typedef struct
 
 HANDLE hOutput;
 
+
+void fore_color(int color)
+{
+    SetConsoleTextAttribute(hOutput, color);
+}
+
 char* readline(char* prompt)
 {
     static char buffer[2048];
 
-    SetConsoleTextAttribute(hOutput, 9);
+    fore_color(9);
     fputs(prompt, stdout);
 
-    SetConsoleTextAttribute(hOutput, 7);
+    fore_color(7);
     fgets(buffer, 2048, stdin);
     char* result = (char*) malloc(strlen(buffer) + 1);
     strcpy(result, buffer);
@@ -49,6 +55,10 @@ void add_history(char *unused)
 
 #include <editline/readline.h>
 #include <editline/history.h>
+
+void fore_color(int color)
+{
+}
 
 #endif
 
@@ -113,242 +123,444 @@ int count_nodes(mpc_ast_t *t)
     return count;
 }
 
-lval lval_integer(long integer)
+lval* lval_integer(long integer)
 {
-    lval l;
-    l.type = LVAL_INTEGER;
-    l.integer = integer;
-    return l;
+    lval *v = malloc(sizeof(lval));
+    v->type = LVAL_INTEGER;
+    v->integer = integer;
+    return v;
 }
 
-lval lval_decimal(double decimal)
+lval* lval_decimal(double decimal)
 {
-    lval l;
-    l.type = LVAL_DECIMAL;
-    l.decimal = decimal;
-    return l;
+    lval *v = malloc(sizeof(lval));
+    v->type = LVAL_DECIMAL;
+    v->decimal = decimal;
+    return v;
 }
 
-lval lval_err(int err)
+lval* lval_symbol(char *symbol)
 {
-    lval l;
-    l.type = LVAL_ERR;
-    l.err = err;
-    return l;
+    lval *v = malloc(sizeof(lval));
+    v->type = LVAL_SYM;
+    char *s = malloc(strlen(symbol) + 1);
+    strcpy(s, symbol);
+    v->sym = s;
+    return v;
 }
 
-lval eval_op(lval x, char* op, lval y)
+lval* lval_err(char *err)
 {
-    if (x.type == LVAL_ERR)
+    lval *v = malloc(sizeof(lval));
+    v->type = LVAL_ERR;
+    char *e = malloc(strlen(err) + 1);
+    strcpy(e, err);
+    v->err = e;
+    return v;
+}
+
+lval* lval_sexpr(void)
+{
+    lval *v = malloc(sizeof(lval));
+    v->type = LVAL_SEXPR;
+    v->count = 0;
+    v->cell = NULL;
+    return v;
+}
+
+void lval_del(lval *v)
+{
+    switch (v->type)
     {
-        return x;
-    }
-    if (y.type == LVAL_ERR)
-    {
-        return y;
-    }
+        case LVAL_DECIMAL:
+        case LVAL_INTEGER:
+            break;
 
-    if (x.type == LVAL_INTEGER && y.type == LVAL_INTEGER)
+        case LVAL_ERR:
+            free(v->err);
+            break;
+
+        case LVAL_SYM:
+            free(v->sym);
+            break;
+
+        case LVAL_SEXPR:
+            for (int i = 0; i < v->count; i++)
+            {
+                lval_del(v->cell[i]);
+            }
+            free(v->cell);
+            break;
+    }
+    free(v);
+}
+
+lval* eval_op(lval* x, char* op, lval* y)
+{
+    lval *result = NULL;
+    if (x->type == LVAL_INTEGER && y->type == LVAL_INTEGER)
     {
         if (strcmp(op, "+") == 0)
         {
-            return lval_integer(x.integer + y.integer);
+            result = lval_integer(x->integer + y->integer);
         }
         else if (strcmp(op, "-") == 0)
         {
-            return lval_integer(x.integer - y.integer);
+            result = lval_integer(x->integer - y->integer);
         }
         else if (strcmp(op, "*") == 0)
         {
-            return lval_integer(x.integer * y.integer);
+            result = lval_integer(x->integer * y->integer);
         }
         else if (strcmp(op, "/") == 0)
         {
-            if (y.integer == 0)
+            if (y->integer == 0)
             {
-                return lval_err(LERR_DIV_ZERO);
+                result = lval_err("Divison by zero");
             }
             else
             {
-                return lval_integer(x.integer / y.integer);
+                result = lval_integer(x->integer / y->integer);
             }
         }
         else if (strcmp(op, "%") == 0)
         {
-            if (y.integer == 0)
+            if (y->integer == 0)
             {
-                return lval_err(LERR_DIV_ZERO);
+                result = lval_err("Division by zero");
             }
             else
             {
-                return lval_integer(x.integer % y.integer);
+                result = lval_integer(x->integer % y->integer);
             }
         }
         else if (strcmp(op, "^") == 0)
         {
-            long result = 1;
-            for (long l = 0; l < y.integer; l++)
+            long z = 1;
+            for (long l = 0; l < y->integer; l++)
             {
-                result *= x.integer;
+                z *= x->integer;
             }
-            return lval_integer(result);
+            result = lval_integer(z);
         }
         else if (strcmp(op, "min") == 0)
         {
-            return lval_integer(x.integer < y.integer ? x.integer : y.integer);
+            result = lval_integer(x->integer < y->integer ? x->integer : y->integer);
         }
         else if (strcmp(op, "max") == 0)
         {
-            return lval_integer(x.integer > y.integer ? x.integer : y.integer);
+            result = lval_integer(x->integer > y->integer ? x->integer : y->integer);
         }
     }
-    else if (x.type == LVAL_DECIMAL && y.type == LVAL_DECIMAL)
+    else if (x->type == LVAL_DECIMAL && y->type == LVAL_DECIMAL)
     {
         if (strcmp(op, "+") == 0)
         {
-            return lval_decimal(x.decimal + y.decimal);
+            result = lval_decimal(x->decimal + y->decimal);
         }
         else if (strcmp(op, "-") == 0)
         {
-            return lval_decimal(x.decimal - y.decimal);
+            result = lval_decimal(x->decimal - y->decimal);
         }
         else if (strcmp(op, "*") == 0)
         {
-            return lval_decimal(x.decimal * y.decimal);
+            result = lval_decimal(x->decimal * y->decimal);
         }
         else if (strcmp(op, "/") == 0)
         {
-            if (y.decimal == 0)
+            if (y->decimal == 0)
             {
-                return lval_err(LERR_DIV_ZERO);
+                result = lval_err("Division by zero");
             }
             else
             {
-                return lval_decimal(x.decimal / y.decimal);
+                result = lval_decimal(x->decimal / y->decimal);
             }
         }
         else if (strcmp(op, "%") == 0)
         {
-            if (y.decimal == 0)
+            if (y->decimal == 0)
             {
-                return lval_err(LERR_DIV_ZERO);
+                result = lval_err("Division by zero");
             }
             else
             {
-                return lval_err(LERR_BAD_OP); // TODO: Is there a proper implementation for this?
+                result = lval_err("Not implemented"); // TODO: Is there a proper implementation for this?
             }
         }
         else if (strcmp(op, "^") == 0)
         {
-            return lval_decimal(pow(x.decimal, y.decimal));
+            result = lval_decimal(pow(x->decimal, y->decimal));
         }
         else if (strcmp(op, "min") == 0)
         {
-            return lval_decimal(x.decimal < y.decimal ? x.decimal : y.decimal);
+            result = lval_decimal(x->decimal < y->decimal ? x->decimal : y->decimal);
         }
         else if (strcmp(op, "max") == 0)
         {
-            return lval_decimal(x.decimal > y.decimal ? x.decimal : y.decimal);
+            result = lval_decimal(x->decimal > y->decimal ? x->decimal : y->decimal);
         }
     }
-    else if (x.type == LVAL_DECIMAL && y.type == LVAL_INTEGER)
+    else if (x->type == LVAL_DECIMAL && y->type == LVAL_INTEGER)
     {
-        return eval_op(x, op, lval_decimal((double) y.integer));
+        y->type = LVAL_DECIMAL;
+        y->decimal = (double) y->integer;
+        return eval_op(x, op, y);
     }
-    else if (x.type == LVAL_INTEGER && y.type == LVAL_DECIMAL)
+    else if (x->type == LVAL_INTEGER && y->type == LVAL_DECIMAL)
     {
-        return eval_op(lval_decimal((double)x.integer), op, y);
-    }
-
-    return lval_err(LERR_BAD_OP);
-}
-
-lval eval(mpc_ast_t* t)
-{
-    if (strstr(t->tag, "integer"))
-    {
-        errno = 0;
-        long x = strtol(t->contents, NULL, 10);
-        return errno == ERANGE ? lval_err(LERR_BAD_NUM) : lval_integer(x);
-    }
-    else if (strstr(t->tag, "decimal"))
-    {
-        errno = 0;
-        double x = strtof(t->contents, NULL);
-        return errno == ERANGE ? lval_err(LERR_BAD_NUM) : lval_decimal(x);
+        x->type = LVAL_DECIMAL;
+        x->decimal = (double) x->integer;
+        return eval_op(x, op, y);
     }
 
-    char* op = t->children[1]->contents;
-    lval result = eval(t->children[2]);
-    // unary plus / minus
-    if (t->children_num == 4 && strcmp(op, "-") == 0)
+    lval_del(x);
+    lval_del(y);
+    if (result == NULL)
     {
-        lval zero = lval_integer(0);
-        result = eval_op(zero, "-", result);
+        return lval_err("Unknown symbol");
     }
-    else
-    {
-        for (int i = 3; i < t->children_num - 1; i++)
-        {
-            result = eval_op(result, op, eval(t->children[i]));
-        }
-    }
-
     return result;
 }
 
-void lval_print(lval l)
+lval* lval_read_integer(mpc_ast_t *t)
 {
-    if (l.type == LVAL_INTEGER)
+    errno = 0;
+    long x = strtol(t->contents, NULL, 10);
+    return errno == ERANGE ? lval_err("Bad number") : lval_integer(x);
+}
+
+lval* lval_read_decimal(mpc_ast_t *t)
+{
+    errno = 0;
+    double x = strtof(t->contents, NULL);
+    return errno == ERANGE ? lval_err("Bad number") : lval_decimal(x);
+}
+
+lval* lval_add(lval* v, lval* new_cell)
+{
+    v->count++;
+    v->cell = realloc(v->cell, sizeof(lval*) * v->count);
+    v->cell[v->count - 1] = new_cell;
+    return v;
+}
+
+lval* lval_read(mpc_ast_t* t)
+{
+    if (strstr(t->tag, "integer"))
     {
-#ifdef _WIN32
-        SetConsoleTextAttribute(hOutput, 14);
-#endif
-        printf("%li", l.integer);
+        return lval_read_integer(t);
     }
-    else if (l.type == LVAL_DECIMAL)
+    else if (strstr(t->tag, "decimal"))
     {
-#ifdef _WIN32
-        SetConsoleTextAttribute(hOutput, 14);
-#endif
-        printf("%lf", l.decimal);
+        return lval_read_decimal(t);
     }
-    else if (l.type == LVAL_ERR)
+    else if (strstr(t->tag, "symbol"))
     {
-#ifdef _WIN32
-        SetConsoleTextAttribute(hOutput, 12);
-#endif
-        switch (l.err)
+        return lval_symbol(t->contents);
+    }
+
+    lval* x = NULL;
+    if (strcmp(t->tag, ">") == 0)
+    {
+        x = lval_sexpr();
+    }
+    if (strstr(t->tag, "sexpr"))
+    {
+        x = lval_sexpr();
+    }
+
+    for (int i = 0; i < t->children_num - 1; i++)
+    {
+        if (strcmp(t->children[i]->contents, "(") == 0)
         {
-            case LERR_DIV_ZERO:
-                printf("Error: division by zero");
-                break;
-            case LERR_BAD_OP:
-                printf("Error: bad operator");
-                break;
-            case LERR_BAD_NUM:
-                printf("Error: bad number");
-                break;
-            default:
-                printf("Error: unknown error");
-                exit(1);
-                break;
+            continue;
         }
+        if (strcmp(t->children[i]->contents, ")") == 0)
+        {
+            continue;
+        }
+        if (strcmp(t->children[i]->contents, "{") == 0)
+        {
+            continue;
+        }
+        if (strcmp(t->children[i]->contents, "}") == 0)
+        {
+            continue;
+        }
+        if (strcmp(t->children[i]->tag, "regex") == 0)
+        {
+            continue;
+        }
+        x = lval_add(x, lval_read(t->children[i]));
+    }
+
+    return x;
+
+}
+
+void lval_print(lval* v);
+
+void lval_expr_print(lval* v, char open, char close)
+{
+    putchar(open);
+    for (int i = 0; i < v->count; i++)
+    {
+        lval_print(v->cell[i]);
+        if (i != (v->count - 1))
+        {
+            putchar(' ');
+        }
+    }
+    putchar(close);
+}
+
+void lval_print(lval* v)
+{
+    fore_color(14);
+    if (v->type == LVAL_INTEGER)
+    {
+        printf("%li", v->integer);
+    }
+    else if (v->type == LVAL_DECIMAL)
+    {
+        printf("%lf", v->decimal);
+    }
+    else if (v->type == LVAL_SYM)
+    {
+        printf("%s", v->sym);
+    }
+    else if (v->type == LVAL_SEXPR)
+    {
+        lval_expr_print(v, '(', ')');
+    }
+    else if (v->type == LVAL_ERR)
+    {
+        fore_color(12);
+        printf("Error: %s", v->err);
     }
     else
     {
-#ifdef _WIN32
-        SetConsoleTextAttribute(hOutput, 12);
-#endif
+        fore_color(12);
         printf("Internal error!!!");
         exit(2);
     }
 }
 
-void lval_println(lval l)
+void lval_println(lval* v)
 {
-    lval_print(l);
+    lval_print(v);
     putchar('\n');
+}
+
+lval* lval_pop(lval* v, int i)
+{
+    if (v->count == 0 || i >= v->count)
+    {
+        return lval_err("Popping from empty expression");
+    }
+    lval* x = v->cell[i];
+    memmove(&v->cell[i], &v->cell[i + 1], sizeof(lval*) * (v->count - i - 1));
+    v->count--;
+    v->cell = realloc(v->cell, sizeof(lval*) * v->count);
+    return x;
+}
+
+lval* lval_take(lval* v, int i)
+{
+    lval* x = lval_pop(v, i);
+    lval_del(v);
+    return x;
+}
+
+lval* builtin_op(lval* v, char* sym)
+{
+    lval* x = lval_pop(v, 0);
+
+    for (int i = 0; i < v->count; i++)
+    {
+        if (v->cell[i]->type != LVAL_INTEGER && v->cell[i]->type != LVAL_DECIMAL)
+        {
+            lval_del(v);
+            return lval_err("Invalid operand, expected integer or decimal");
+        }
+    }
+
+    if (v->count == 0 && strcmp(sym, "-") == 0)
+    {
+        if (x->type == LVAL_INTEGER)
+        {
+            x->integer = -x->integer;
+        }
+        else if (x->type == LVAL_DECIMAL)
+        {
+            x->decimal = -x->decimal;
+        }
+    }
+
+    while (v->count > 0)
+    {
+        lval* y = lval_pop(v, 0);
+        x = eval_op(x, sym, y);
+    }
+
+    lval_del(v);
+    return x;
+}
+
+lval* lval_eval(lval* v);
+
+lval* lval_eval_sexpr(lval* v)
+{
+    if (v->count == 0)
+    {
+        return v;
+    }
+
+    for (int i = 0; i < v->count; i++)
+    {
+        v->cell[i] = lval_eval(v->cell[i]);
+    }
+
+    for (int i = 0; i < v->count; i++)
+    {
+        if (v->cell[i]->type == LVAL_ERR)
+        {
+            lval* u = lval_take(v, i);
+            return u;
+        }
+    }
+
+    if (v->count == 1)
+    {
+        lval* u = lval_take(v, 0);
+        return u;
+    }
+
+    lval* op = lval_pop(v, 0);
+
+    if (op->type != LVAL_SYM)
+    {
+        lval_del(op);
+        lval_del(v);
+        return lval_err("Symbol expected on s-expression");
+    }
+
+    lval* result = builtin_op(v, op->sym);
+    lval_del(op);
+    return result;
+}
+
+lval* lval_eval(lval* v)
+{
+    if (v->type == LVAL_SEXPR)
+    {
+        return lval_eval_sexpr(v);
+    }
+    else
+    {
+        return v;
+    }
 }
 
 int main(int argc, char** argv)
@@ -356,7 +568,8 @@ int main(int argc, char** argv)
     mpc_parser_t* Integer = mpc_new("integer");
     mpc_parser_t* Decimal = mpc_new("decimal");
     mpc_parser_t* Number = mpc_new("number");
-    mpc_parser_t* Operator = mpc_new("operator");
+    mpc_parser_t* Symbol = mpc_new("symbol");
+    mpc_parser_t* Sexpr = mpc_new("sexpr");
     mpc_parser_t* Expr = mpc_new("expr");
     mpc_parser_t* Lispy = mpc_new("lispy");
 
@@ -364,29 +577,29 @@ int main(int argc, char** argv)
         "integer  : /-?[0-9]+/ ; "
         "decimal  : /-?[0-9]*\\.[0-9]+/ ; "
         "number   : <decimal> | <integer> ; "
-        "operator : '+' | '-' | '*' | '/' | '%' | '^' | \"min\" | \"max\"; "
-        "expr     : <number> | '(' <operator> <expr>+ ')' ; "
-        "lispy    : /^/ <operator> <expr>+ /$/ ; ";
+        "symbol   : '+' | '-' | '*' | '/' | '%' | '^' | \"min\" | \"max\"; "
+        "sexpr    : '(' <expr>* ')' ; "
+        "expr     : <number> | <symbol> | <sexpr> ; "
+        "lispy    : /^/ <expr>* /$/ ; ";
 
 
-    mpca_lang(MPCA_LANG_DEFAULT, Grammar, Integer, Decimal, Number, Operator, Expr, Lispy);
+    mpca_lang(MPCA_LANG_DEFAULT, Grammar, Integer, Decimal, Number, Symbol, Sexpr, Expr, Lispy);
 
 #ifdef _WIN32
     CONSOLE_SCREEN_BUFFER_INFO csbInfo;
     hOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     GetConsoleScreenBufferInfo(hOutput, &csbInfo);
-    SetConsoleTextAttribute(hOutput, 10);
 #endif
-    puts("Felispy 0.0.8 - by Felipo");
+
+    fore_color(10);
+    puts("Felispy 0.0.9 - by Felipo");
     puts("Type ctrl+C to exit.\n");
 
     while (1)
     {
         char* input = readline("Felispy> ");
 
-#ifdef _WIN32
-        SetConsoleTextAttribute(hOutput, 3);
-#endif
+        fore_color(3);
         //printf("Input: %s\n", input);
 
         mpc_result_t result;
@@ -397,31 +610,34 @@ int main(int argc, char** argv)
             printf("Nodes: %d\n", count_nodes(result.output));
             printf("Leaves: %d\n", count_leaves(result.output));
             printf("Max. Leaves: %d\n", max_leaves(result.output));
-#ifdef _WIN32
-            SetConsoleTextAttribute(hOutput, 11);
-#endif
+            fore_color(11);
             mpc_ast_print(result.output);
             */
-            lval_println(eval(result.output));
+            //lval* v = eval(result.output);
+            lval* v = lval_read(result.output);
+            lval_println(v);
+            v = lval_eval(v); // ???
+            lval_println(v);
+            lval_del(v);
 
             mpc_ast_delete(result.output);
         }
         else
         {
-#ifdef _WIN32
-            SetConsoleTextAttribute(hOutput, 13);
-#endif
+            fore_color(13);
             mpc_err_print(result.error);
             mpc_err_delete(result.error);
         }
 
         free(input);
+
+        debug_check();
     }
 
 #ifdef _WIN32
     SetConsoleTextAttribute(hOutput, csbInfo.wAttributes);
 #endif
 
-    mpc_cleanup(6, Integer, Decimal, Number, Operator, Expr, Lispy);
+    mpc_cleanup(7, Integer, Decimal, Number, Symbol, Sexpr, Expr, Lispy);
     return 0;
 }
